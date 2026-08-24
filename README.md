@@ -5,110 +5,133 @@
 [![Simulator: Icarus Verilog](https://img.shields.io/badge/Simulator-Icarus%20Verilog%2012.0-green.svg)](http://iverilog.icarus.com/)
 [![Tests: 14/14 passing](https://img.shields.io/badge/tests-14%2F14%20passing-brightgreen.svg)](#testing)
 
-A 5-stage pipelined RISC-V CPU core implementing a subset of RV32I,
-with real data hazard forwarding, a load-use stall, and branch
-resolution with pipeline flush.
+A 5-stage pipelined RISC-V core, RV32I subset. Real forwarding, a
+load-use stall, branches that actually resolve and flush correctly.
+Not a toy that just compiles — it runs a program and gets the right
+answer.
+
+## Contents
+- [Status](#status)
+- [What it actually runs](#what-it-actually-runs)
+- [Hazards, briefly](#hazards-briefly)
+- [Repo layout](#repo-layout)
+- [Running it](#running-it)
+- [Testing](#testing)
+- [The 5 stages, quickly](#the-5-stages-quickly)
+- [Still missing](#still-missing)
+- [License](#license)
 
 ## Status
 
-An earlier version of this repository had its control logic mostly
-stubbed out: the program counter was hardcoded to 0 (so the CPU could
-never fetch past the first instruction), the ALU's second operand
-always used the immediate value (so register-register instructions
-like `ADD` were structurally impossible), the ALU operation was
-hardcoded to always add, and the hazard-detection signals were
-declared but never assigned. The code didn't even compile — two
-identifiers (`RESET_VECTOR`, `mem_wb_mem_to_reg`) were referenced but
-never declared.
+Earlier version of this repo looked like a pipeline but wasn't one.
+PC was hardcoded to 0, so it could never fetch past the first
+instruction. The ALU's second operand was hardcoded to the immediate,
+meaning `ADD rd, rs1, rs2` couldn't work even in theory. ALU op was
+hardcoded to add, always. Hazard signals were declared and then never
+touched again. It didn't even compile — two identifiers were used but
+never declared anywhere.
 
-This version replaces that with an actual working pipeline: a real PC
-register, full instruction decode for R-type/I-type ALU ops, loads,
-stores, and branches, full EX/MEM + MEM/WB forwarding to the ALU, a
-same-cycle register-file write-then-read bypass, a load-use stall, and
-branch resolution in EX with a pipeline flush on taken branches.
+None of that was reachable in simulation, by the way, which is
+probably why nobody caught it. If the PC never moves, you never
+execute a second instruction, so a stall bug three instructions later
+just... never comes up.
 
-**Verified:** a 16-instruction test program exercising every hazard
-type above (back-to-back ALU dependencies, a store/load pair, a
-load-use stall, two taken branches with squashed wrong-path
-instructions) produces the correct final register and memory state —
-14 checks, all passing. See [Testing](#testing) to reproduce.
+Rewrote it. Real PC register, full decode for R-type/I-type ALU ops,
+loads, stores, branches. EX/MEM and MEM/WB forwarding into the ALU. A
+same-cycle bypass in the register file (write and read the same
+register in the same cycle, you get the write). Load-use stall.
+Branches resolve in EX and flush the pipeline correctly on a taken
+branch.
 
-## Instruction Set Support
+Ran a 16-instruction program through it that hits every hazard type
+above — back-to-back ALU dependencies, a store immediately followed by
+a load from the same address, a load-use hazard, two taken branches
+with instructions that should get squashed. 14 checks, all correct.
+Command's below if you want to run it yourself.
 
-**Implemented and verified:**
-- R-type ALU: `ADD`, `SUB`, `AND`, `OR`, `XOR`, `SLL`, `SRL`, `SRA`
-- I-type ALU: `ADDI`, `ANDI`, `ORI`, `XORI`, `SLLI`, `SRLI`, `SRAI`
-- Memory: `LW`, `SW`
-- Branches: `BEQ`, `BNE`
+## What it actually runs
 
-**Not implemented** (decoded as harmless no-ops, do not affect other
-instructions, but produce no useful result themselves): `LUI`,
-`AUIPC`, `JAL`, `JALR`, `SLT`/`SLTU`/`SLTI`, other load/store widths
-(`LB`/`LH`/etc.), `FENCE`, `ECALL`/`EBREAK`.
+R-type: `ADD` `SUB` `AND` `OR` `XOR` `SLL` `SRL` `SRA`
+I-type: `ADDI` `ANDI` `ORI` `XORI` `SLLI` `SRLI` `SRAI`
+Memory: `LW` `SW`
+Branches: `BEQ` `BNE`
 
-## Hazard Handling
+That's it for now. `LUI`, `AUIPC`, `JAL`, `JALR`, the `SLT` family,
+byte/halfword loads and stores, `FENCE`, `ECALL`/`EBREAK` — none of
+that's wired up. They decode as harmless no-ops (won't corrupt
+anything else running), they just don't do anything useful themselves.
 
-- **Data hazards (RAW):** full forwarding from EX/MEM and MEM/WB back
-  into the EX stage's ALU operands, plus a same-cycle bypass in the
-  register file read logic for the case where WB and ID access the
-  same register in the same cycle.
-- **Load-use hazard:** a `LW` immediately followed by an instruction
-  that needs its result can't be solved by forwarding alone (the
-  loaded value isn't available until MEM), so the pipeline stalls for
-  exactly one cycle.
-- **Control hazards:** branches resolve in EX. A taken branch flushes
-  the one wrong-path instruction already fetched into IF/ID and
-  redirects the PC — see `doc/architecture.md` for why only one
-  instruction needs squashing here, not two.
+## Hazards, briefly
 
-## Repository Structure
+RAW hazards get fixed by forwarding — EX/MEM first, then MEM/WB if
+EX/MEM doesn't have it, then whatever the register file already gave
+you in ID. Plus that same-cycle write/read bypass I mentioned above.
+
+Load-use is the one forwarding can't fix on its own, since the loaded
+value literally doesn't exist yet until MEM. One-cycle stall, that's
+it.
+
+Branches resolve in EX because that's where the ALU lives and you
+need the ALU to know if the branch is taken. By the time a branch
+gets there, exactly one wrong-path instruction has already been
+fetched behind it — not two, just one, because the PC hasn't caught
+up to the fall-through address yet. So a taken branch squashes that
+one instruction and redirects the PC. Full reasoning's in
+`doc/architecture.md` if you want the cycle-by-cycle version.
+
+## Repo layout
 ```
 picosrv32/
 ├── rtl/
 │   └── picosrv32.sv      # CPU pipeline + ALU
 ├── tb/
-│   └── tb_picosrv32.sv   # Self-checking testbench
+│   └── tb_picosrv32.sv   # self-checking testbench
 ├── doc/
-│   └── architecture.md   # Pipeline design, hazard handling, scope
+│   └── architecture.md   # design writeup, hazard handling, what's not done
 └── README.md
 ```
 
-## Getting Started
-1. Clone: `git clone https://github.com/SharmaSaurabh-git/picosrv32.git`
-2. Install Icarus Verilog: `pkg install iverilog` (Termux) or
-   `sudo apt-get install iverilog` (Debian/Ubuntu)
-3. Compile and simulate: `make sim-iverilog`
-4. View waveform (optional, needs a GUI): `gtkwave picosrv32.vcd`
+## Running it
 
-`make sim` (Verilator, `--binary` mode) should also work but is
-untested in this repo's history — `make sim-iverilog` is what this
-design was actually verified with.
+```
+git clone https://github.com/SharmaSaurabh-git/picosrv32.git
+cd picosrv32
+pkg install iverilog        # or: sudo apt-get install iverilog
+make sim-iverilog
+```
+
+Want the waveform? `gtkwave picosrv32.vcd` after running, if you've
+got a GUI available.
+
+There's also a `make sim` target for Verilator (`--binary` mode) but
+I haven't actually run that one — `make sim-iverilog` is what this was
+verified against, so use that if you want the tested path.
 
 ## Testing
 ```bash
 make sim-iverilog
 ```
-Runs a 16-instruction program covering every hazard type the pipeline
-handles, and checks final register/memory state against expected
-values computed independently. Expected output ends with
-`All tests PASSED.`
+Runs the 16-instruction program, checks the final register file and
+memory state against values worked out independently (not just "did
+it crash"). Ends with `All tests PASSED.` if everything's right.
 
-## Pipeline Stages
-1. **IF** — fetch from instruction memory using the PC
-2. **ID** — decode opcode/funct3/funct7, read registers (with
-   same-cycle WB bypass), select immediate format
-3. **EX** — forward operands from EX/MEM and MEM/WB, run the ALU,
-   resolve branches
-4. **MEM** — access data memory for loads/stores
-5. **WB** — write the result back to the register file
+## The 5 stages, quickly
 
-## Future Enhancements
-- `LUI`/`AUIPC`/`JAL`/`JALR` (currently unimplemented no-ops)
-- `SLT`/`SLTU`/`SLTI` comparison instructions
-- Byte/halfword loads and stores (`LB`/`LH`/`LBU`/`LHU`/`SB`/`SH`)
-- Branch prediction (currently always-not-taken until EX resolves)
-- A proper memory system (currently a flat combinational array in the
-  testbench, not a real memory hierarchy)
+1. **IF** — fetch, PC-driven
+2. **ID** — decode opcode/funct3/funct7, read registers (with the WB
+   bypass), pick the right immediate format
+3. **EX** — forward operands, run the ALU, resolve branches here
+4. **MEM** — load/store to data memory
+5. **WB** — write back to the register file
+
+## Still missing
+- `LUI` / `AUIPC` / `JAL` / `JALR`
+- `SLT` / `SLTU` / `SLTI`
+- byte and halfword loads/stores — only `LW`/`SW` right now
+- branch prediction — right now it just eats the one-cycle penalty
+  every taken branch, no prediction at all
+- an actual memory system — right now it's a flat array in the
+  testbench, not anything resembling a cache
 
 ## License
 MIT

@@ -23,7 +23,14 @@ module picosrv32 #(
     output wire [31:0]            dmem_addr,
     output wire [31:0]            dmem_wdata,
     output wire                   dmem_we,
-    input  wire [31:0]            dmem_rdata
+    input  wire [31:0]            dmem_rdata,
+	
+    // Debug / verification signals
+    output reg  [31:0]            id_ex_alu_result,
+    output reg  [31:0]            id_ex_pc,
+    output reg                    id_ex_is_jal,
+    output reg                    id_ex_is_jalr,
+    output reg  [6:0]             id_ex_opcode
 );
 
     localparam [31:0] NOP = 32'h0000_0013; // addi x0, x0, 0
@@ -37,6 +44,12 @@ module picosrv32 #(
     localparam [6:0] OP_LOAD   = 7'b0000011;
     localparam [6:0] OP_STORE  = 7'b0100011;
     localparam [6:0] OP_BRANCH = 7'b1100011;
+    localparam [6:0] OP_LUI    = 7'b0110111; // Load Upper Immediate
+    localparam [6:0] OP_AUIPC  = 7'b0010111; // Add Upper Immediate to PC
+    localparam [6:0] OP_JAL    = 7'b1101111; // Jump and Link
+    localparam [6:0] OP_JALR   = 7'b1100111; // Jump and Link Register
+    localparam [6:0] OP_SLT    = 7'b0110011; // Set Less Than (funct3=011)
+    localparam [6:0] OP_SLTI   = 7'b0010011; // Set Less Than Immediate (funct3=011)
 
     //======================================================================
     //  Program Counter
@@ -100,14 +113,19 @@ module picosrv32 #(
 
     wire [31:0] imm_sel = (opcode == OP_STORE)  ? imm_s :
                           (opcode == OP_BRANCH) ? imm_b :
-                                                    imm_i; // loads + I-ALU
+                                                    imm_i; // loads + I-ALU + LUI + AUIPC + SLTI
 
     wire is_r_type  = (opcode == OP_R);
     wire is_i_alu   = (opcode == OP_I_ALU);
     wire is_load    = (opcode == OP_LOAD);
     wire is_store   = (opcode == OP_STORE);
     wire is_branch  = (opcode == OP_BRANCH);
-    wire reg_write_d = is_r_type || is_i_alu || is_load;
+    wire is_lui     = (opcode == OP_LUI);
+    wire is_auipc   = (opcode == OP_AUIPC);
+    wire is_jal     = (opcode == OP_JAL);
+    wire is_jalr    = (opcode == OP_JALR);
+    wire is_slt     = (opcode == OP_SLT) || (opcode == OP_SLTI);
+    wire reg_write_d = is_r_type || is_i_alu || is_load || is_lui || is_auipc || is_jal || is_jalr;
 
     function [2:0] alu_op_decode(input [6:0] op, input [2:0] f3, input f7b5);
         begin
@@ -119,10 +137,15 @@ module picosrv32 #(
                     3'b100:  alu_op_decode = ALU_XOR;
                     3'b101:  alu_op_decode = f7b5 ? ALU_SRA : ALU_SRL;
                     3'b001:  alu_op_decode = ALU_SLL;
+                    3'b011:  alu_op_decode = ALU_SUB; // SLT/SLTI: set less than via subtraction
                     default: alu_op_decode = ALU_ADD;
                 endcase
             end else if (op == OP_BRANCH) begin
                 alu_op_decode = ALU_SUB; // compare via subtract, check zero
+            end else if (op == OP_LUI || op == OP_AUIPC) begin
+                alu_op_decode = ALU_ADD; // LUI/AUIPC: just pass immediate (or PC+imm for AUIPC, but ALU just adds)
+            end else if (op == OP_JAL || op == OP_JALR) begin
+                alu_op_decode = ALU_ADD; // JAL/JALR: address computation via ALU add
             end else begin
                 alu_op_decode = ALU_ADD; // loads/stores: address = base + offset
             end
@@ -192,6 +215,10 @@ module picosrv32 #(
                           (id_ex_funct3 == 3'b001 && !alu_zero));   // BNE
     wire [31:0] branch_target = id_ex_pc + id_ex_imm;
     wire        branch_flush  = branch_taken;
+    
+    // JAL/JALR target computation
+    wire [31:0] jal_target = id_ex_pc + id_ex_imm;       // JAL: PC-relative
+    wire [31:0] jalr_target = id_ex_alu_result;          // JALR: ALU result (rs1 + imm)
 
     //======================================================================
     //  IF Stage
@@ -201,12 +228,36 @@ module picosrv32 #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             pc_reg <= RESET_VECTOR;
+            id_ex_alu_result <= 32'd0;
+            id_ex_pc <= RESET_VECTOR;
+            id_ex_is_jal <= 1'b0;
+            id_ex_is_jalr <= 1'b0;
         end else if (branch_flush) begin
             pc_reg <= branch_target;
+            id_ex_alu_result <= alu_result;
+            id_ex_pc <= pc_reg;
+            id_ex_is_jal <= 1'b0;
+            id_ex_is_jalr <= 1'b0;
+        end else if (id_ex_is_jal) begin
+            pc_reg <= jal_target;
+            id_ex_alu_result <= jal_target;
+            id_ex_pc <= jal_target;
+            id_ex_is_jal <= 1'b0;
+            id_ex_is_jalr <= 1'b0;
+        end else if (id_ex_is_jalr) begin
+            pc_reg <= jalr_target;
+            id_ex_alu_result <= jalr_target;
+            id_ex_pc <= jalr_target;
+            id_ex_is_jal <= 1'b0;
+            id_ex_is_jalr <= 1'b0;
         end else if (stall) begin
             pc_reg <= pc_reg;
+            id_ex_alu_result <= id_ex_alu_result;
+            id_ex_pc <= id_ex_pc;
         end else begin
             pc_reg <= pc_plus_4;
+            id_ex_alu_result <= alu_result;
+            id_ex_pc <= pc_reg;
         end
     end
 
@@ -245,6 +296,7 @@ module picosrv32 #(
             id_ex_alu_use_rs2  <= 1'b0;
             id_ex_alu_op       <= ALU_ADD;
             id_ex_funct3       <= 3'b000;
+            id_ex_opcode       <= 7'b0000000;
         end else begin
             id_ex_pc           <= if_id_pc;
             id_ex_rs1          <= reg_rs1;
@@ -260,6 +312,7 @@ module picosrv32 #(
             id_ex_alu_use_rs2  <= is_r_type || is_branch;
             id_ex_alu_op       <= alu_op_decode(opcode, funct3, funct7_bit5);
             id_ex_funct3       <= funct3;
+            id_ex_opcode       <= opcode;
         end
     end
 
