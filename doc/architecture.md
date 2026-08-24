@@ -1,89 +1,120 @@
 # Picosrv32 Architecture
 
 ## Overview
-Picosrv32 is an educational 5-stage pipelined RISC-V CPU core designed to demonstrate fundamental concepts in computer architecture and VLSI design. While it implements a simplified instruction set for clarity, it captures the essential principles of modern CPU design.
+Picosrv32 is a 5-stage pipelined RISC-V core (RV32I subset). It
+implements real data forwarding and branch resolution, not just the
+pipeline register plumbing — see "Design history" below for why that
+distinction matters.
 
 ## Pipeline Stages
 
 ### 1. Instruction Fetch (IF)
-- Fetches instruction from instruction memory
-- Uses Program Counter (PC) to determine address
-- Increments PC by 4 for sequential execution
-- Handles branch redirection
+- `imem_addr` is driven directly by a real PC register (`pc_reg`)
+- PC advances by 4 each cycle unless stalled (holds) or a branch just
+  resolved (redirects to the branch target)
 
 ### 2. Instruction Decode (ID)
-- Decodes instruction fields (opcode, funct3, funct7, rs1, rs2, rd, immediate)
-- Reads operands from register file
-- Generates immediate values for I-type, S-type, B-type, U-type, J-type instructions
-- Detects hazards and inserts stalls when necessary
+- Decodes opcode/funct3/funct7, selects the correct immediate format
+  (I/S/B) based on opcode
+- Reads `rs1`/`rs2` from the register file, with a same-cycle
+  write-then-read bypass (see "Register File" below)
+- Computes `load_use_stall` (see "Hazard Handling")
 
 ### 3. Execute (EX)
-- Performs ALU operations (arithmetic, logical, shift)
-- Calculates branch targets
-- Computes memory addresses for load/store instructions
-- Forwards results from later stages to avoid stalls
+- Selects ALU operands via the forwarding muxes (see "Forwarding")
+- Runs the ALU (add/sub/and/or/xor/shift)
+- For branches, subtracts `rs1 - rs2` and checks the ALU's zero flag
+  against `funct3` to determine `BEQ`/`BNE`
+- Computes `branch_target = id_ex_pc + id_ex_imm`
 
 ### 4. Memory (MEM)
-- Reads from or writes to data memory
-- Handles load/store instructions
-- Passes through ALU results for register-register operations
+- `dmem_addr`/`dmem_wdata`/`dmem_we` driven from the EX/MEM register
+- Store data (`ex_mem_rs2_data`) is latched from the *forwarded*
+  value, not the raw ID-stage register read — otherwise a store whose
+  source register was just computed by the immediately preceding
+  instruction would write stale data
 
 ### 5. Write Back (WB)
-- Writes results back to register file
-- Chooses between ALU result and load data based on instruction type
+- Selects between `mem_wb_alu_result` and `mem_wb_load_data` based on
+  `mem_wb_mem_to_reg`, writes to the register file
 
-## Instruction Set (Supported Subset)
+## Register File
+Reads are combinational, with one deliberate exception: if the
+currently-retiring WB instruction is writing the same register ID is
+reading this cycle, the read returns the WB value directly instead of
+the (stale, pre-write) register file contents. Without this, a
+same-cycle write/read on the same register would silently read the
+old value, since the actual register file write uses a non-blocking
+assignment that doesn't take effect until after the read has already
+happened combinationally.
 
-### Register-Immediate Instructions
-- `ADDI rd, rs1, imm`: rd = rs1 + sign_extended(imm)
+## Forwarding
+Two forwarding sources feed each ALU operand mux, checked in this
+priority order:
+1. **EX/MEM** — if the instruction currently in MEM will write the
+   register this instruction needs, forward its ALU result directly
+2. **MEM/WB** — otherwise, if the instruction currently in WB will
+   write it, forward the WB write-back value
 
-### Register-Register Instructions  
-- `ADD rd, rs1, rs2`: rd = rs1 + rs2
-- `SUB rd, rs1, rs2`: rd = rs1 - rs2
-- `AND rd, rs1, rs2`: rd = rs1 & rs2
-- `OR rd, rs1, rs2`: rd = rs1 | rs2
-- `XOR rd, rs1, rs2`: rd = rs1 ^ rs2
-- `SLL rd, rs1, rs2`: rd = rs1 << rs2(4:0)
-- `SRL rd, rs1, rs2`: rd = rs1 >> rs2(4:0) (logical)
-- `SRA rd, rs1, rs2`: rd = rs1 >> rs2(4:0) (arithmetic)
+If neither matches, the operand falls back to the value the register
+file supplied when this instruction was in ID.
 
 ## Hazard Handling
-The current implementation includes basic stall insertion for load-use hazards:
-- When an instruction in EX stage is a load, and the next instruction in ID stage needs the loaded result
-- The pipeline stalls for one cycle to allow the load to complete
 
-## Memory Interface
-- Separate instruction and data memory (Harvard architecture)
-- Word-addressable for simplicity in this educational version
-- Byte enables would be added for full byte/half-word support
+### Load-use stall
+Forwarding alone can't fix a load immediately followed by a dependent
+instruction — the loaded value isn't available until the load reaches
+MEM, one stage later than forwarding could reach. `load_use_stall`
+checks whether the instruction currently in EX (`id_ex`) is a load
+whose destination matches either source register of the instruction
+currently in ID. If so, the pipeline holds the PC and IF/ID for one
+cycle and inserts a bubble into ID/EX, then proceeds normally.
 
-## Clock Frequency
-The maximum clock frequency is determined by the critical path, which is typically:
-- Register file read → ALU operation → Register file write
-- Or: PC increment → Instruction memory read → Instruction decode
+### Branch resolution and flush
+Branches resolve in EX, not ID or IF, because resolving them requires
+the ALU (to compare `rs1`/`rs2`) and the ALU only exists in EX. By the
+time a branch reaches EX, the pipeline has already fetched exactly one
+more instruction past it into IF/ID (the one immediately following the
+branch in program order) — it has *not* yet fetched a second one,
+because the PC only advances one instruction per cycle and hasn't
+reached the branch's fall-through target yet when the branch is
+sitting in EX. So a taken branch only needs to squash that one
+already-fetched instruction (by forcing IF/ID to a NOP) and redirect
+the PC to the branch target — the instruction that would have been
+fetched next simply gets fetched correctly from the new PC instead.
 
-## Performance Metrics
-- **Ideal CPI (Cycles Per Instruction)**: 1.0 (perfect pipelining)
-- **Actual CPI**: >1.0 due to stalls from hazards, branches, memory delays
-- **Throughput**: Instructions per second = Clock Frequency / Actual CPI
-- **Area**: Primarily determined by register file size and pipeline register count
+## Design history: why this needed a rewrite, not a patch
 
-## Design Trade-offs Made for Education
-1. **Simplified Instruction Set**: Focuses on core concepts rather than completeness
-2. **Ideal Memory Assumption**: Assumes single-cycle memory access (would add wait states in reality)
-3. **Basic Hazard Detection**: Only handles load-use stalls (would add more hazard types in reality)
-4. **Simplified ALU**: Limited operations for clarity
-5. **No Forwarding**: Relies on stalls rather than forwarding for simplicity in this version
+The earlier version of this design had several problems that weren't
+independent bugs so much as one underlying issue: the control logic
+was never actually implemented, just scaffolded with `TODO` comments.
+Specifically:
+- `imem_addr` was hardcoded to `32'd0` — the CPU could never fetch a
+  second instruction
+- The ALU's second operand was hardcoded to the immediate value,
+  meaning register-register instructions like `ADD rd, rs1, rs2`
+  couldn't work even in principle, regardless of the PC bug
+- The ALU operation was hardcoded to always add
+- `stall` and `load_use_stall` were declared but never driven by any
+  logic
+- The design referenced `RESET_VECTOR` and `mem_wb_mem_to_reg` without
+  ever declaring either — it did not compile
 
-## Future Work
-To make this a more complete CPU core, consider adding:
-1. Complete RV32I instruction set
-2. Proper forwarding unit to eliminate stalls
-3. Branch prediction (static/dynamic)
-4. Cache memory hierarchy
-5. Memory management unit (MMU)
-6. Privilege levels and trap handling
-7. Performance monitoring counters
-8. Debug interface (JTAG)
-9. Integration with realistic memory models
-10. Bootloader and simple monitor program
+Because none of this was reachable (the PC bug alone prevented any
+instruction past the first from ever executing), none of it could have
+been caught by running the testbench, which is exactly why it went
+unnoticed. Fixing this meant implementing the missing control logic
+from scratch — the PC, decode, forwarding, and branch resolution
+described above — rather than patching individual lines.
+
+## Known Limitations
+- `LUI`/`AUIPC`/`JAL`/`JALR` are not implemented (decoded as harmless
+  no-ops — they don't corrupt other instructions, but produce no
+  useful result of their own)
+- No `SLT`/`SLTU`/`SLTI` (comparison-and-set instructions)
+- Only word-width loads/stores (`LW`/`SW`) — no byte/halfword variants
+- No branch prediction — every branch stalls the fetch of its
+  fall-through/target until it resolves in EX (a 1-instruction bubble
+  cost per taken branch, described above)
+- Memory is a flat array in the testbench, not a real cache/memory
+  hierarchy

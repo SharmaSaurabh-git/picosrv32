@@ -2,90 +2,113 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![HDL: SystemVerilog](https://img.shields.io/badge/HDL-SystemVerilog-blue.svg)](https://en.wikipedia.org/wiki/SystemVerilog)
-[![Simulator: Verilator](https://img.shields.io/badge/Simulator-Verilator-green.svg)](https://verilator.org/)
-[![GitHub Stars](https://img.shields.io/github/stars/SharmaSaurabh-git/picosrv32?style=social)](https://github.com/SharmaSaurabh-git/picosrv32/stargazers)
+[![Simulator: Icarus Verilog](https://img.shields.io/badge/Simulator-Icarus%20Verilog%2012.0-green.svg)](http://iverilog.icarus.com/)
+[![Tests: 14/14 passing](https://img.shields.io/badge/tests-14%2F14%20passing-brightgreen.svg)](#testing)
 
-A 5-stage pipelined RISC-V CPU core implementing a subset of the RV32I base integer instruction set. This project demonstrates computer architecture and VLSI design skills, showing understanding of pipelining, hazard detection, forwarding, and instruction set architecture - fundamental skills for CPU designers at companies like Intel, AMD, ARM, Apple, NVIDIA, and RISC-V International members.
+A 5-stage pipelined RISC-V CPU core implementing a subset of RV32I,
+with real data hazard forwarding, a load-use stall, and branch
+resolution with pipeline flush.
 
-## Features
-- 5-stage classic RISC pipeline: Instruction Fetch (IF), Instruction Decode (ID), Execute (EX), Memory (MEM), Write Back (WB)
-- Pipelined execution with basic hazard handling
-- Register file with read/write ports
-- Simple ALU supporting ADD, SUB, AND, OR, XOR, shift operations
-- Basic instruction memory and data memory interfaces
-- Verilog/SystemVerilog implementation
-- Testbench with simple assembly program
-- Waveform generation for GTKWave visualization
+## Status
 
-## Supported Instructions (Demo Subset)
-- **Register-Immediate**: ADDI (add immediate)
-- **Register-Register**: ADD (add registers)
-- **Memory Operations**: Conceptual framework for LOAD/STORE
-- **Control Flow**: Framework for BRANCH and JUMP
+An earlier version of this repository had its control logic mostly
+stubbed out: the program counter was hardcoded to 0 (so the CPU could
+never fetch past the first instruction), the ALU's second operand
+always used the immediate value (so register-register instructions
+like `ADD` were structurally impossible), the ALU operation was
+hardcoded to always add, and the hazard-detection signals were
+declared but never assigned. The code didn't even compile — two
+identifiers (`RESET_VECTOR`, `mem_wb_mem_to_reg`) were referenced but
+never declared.
 
-## Why This Matters
-CPU design is at the heart of computing. Understanding pipelining, hazards, and instruction set architecture is essential for:
-- CPU Architects (Intel, AMD, ARM, Apple, Qualcomm)
-- SoC Designers (all semiconductor companies)
-- Embedded Systems Engineers
-- Computer Architects
-- Performance Analysts
+This version replaces that with an actual working pipeline: a real PC
+register, full instruction decode for R-type/I-type ALU ops, loads,
+stores, and branches, full EX/MEM + MEM/WB forwarding to the ALU, a
+same-cycle register-file write-then-read bypass, a load-use stall, and
+branch resolution in EX with a pipeline flush on taken branches.
+
+**Verified:** a 16-instruction test program exercising every hazard
+type above (back-to-back ALU dependencies, a store/load pair, a
+load-use stall, two taken branches with squashed wrong-path
+instructions) produces the correct final register and memory state —
+14 checks, all passing. See [Testing](#testing) to reproduce.
+
+## Instruction Set Support
+
+**Implemented and verified:**
+- R-type ALU: `ADD`, `SUB`, `AND`, `OR`, `XOR`, `SLL`, `SRL`, `SRA`
+- I-type ALU: `ADDI`, `ANDI`, `ORI`, `XORI`, `SLLI`, `SRLI`, `SRAI`
+- Memory: `LW`, `SW`
+- Branches: `BEQ`, `BNE`
+
+**Not implemented** (decoded as harmless no-ops, do not affect other
+instructions, but produce no useful result themselves): `LUI`,
+`AUIPC`, `JAL`, `JALR`, `SLT`/`SLTU`/`SLTI`, other load/store widths
+(`LB`/`LH`/etc.), `FENCE`, `ECALL`/`EBREAK`.
+
+## Hazard Handling
+
+- **Data hazards (RAW):** full forwarding from EX/MEM and MEM/WB back
+  into the EX stage's ALU operands, plus a same-cycle bypass in the
+  register file read logic for the case where WB and ID access the
+  same register in the same cycle.
+- **Load-use hazard:** a `LW` immediately followed by an instruction
+  that needs its result can't be solved by forwarding alone (the
+  loaded value isn't available until MEM), so the pipeline stalls for
+  exactly one cycle.
+- **Control hazards:** branches resolve in EX. A taken branch flushes
+  the one wrong-path instruction already fetched into IF/ID and
+  redirects the PC — see `doc/architecture.md` for why only one
+  instruction needs squashing here, not two.
 
 ## Repository Structure
 ```
 picosrv32/
-├── rtl/                 # Register Transfer Level (Verilog/SystemVerilog)
-│   └── picosrv32.sv     # Top-level CPU and ALU
-├── tb/                  # Testbenches
-│   └── tb_picosrv32.sv  # Testbench with test program
-├── doc/                 # Documentation
-│   └── architecture.md  # Detailed explanation
-├── sim/                 # Simulation outputs
+├── rtl/
+│   └── picosrv32.sv      # CPU pipeline + ALU
+├── tb/
+│   └── tb_picosrv32.sv   # Self-checking testbench
+├── doc/
+│   └── architecture.md   # Pipeline design, hazard handling, scope
 └── README.md
 ```
 
 ## Getting Started
-1. Clone repository: `git clone https://github.com/SharmaSaurabh-git/picosrv32.git`
-2. Install Verilator: `sudo apt-get install verilator` (or use your preferred simulator)
-3. Simulate: `make sim`
-4. View waveform: `gtkwave picosrv32.vcd`
+1. Clone: `git clone https://github.com/SharmaSaurabh-git/picosrv32.git`
+2. Install Icarus Verilog: `pkg install iverilog` (Termux) or
+   `sudo apt-get install iverilog` (Debian/Ubuntu)
+3. Compile and simulate: `make sim-iverilog`
+4. View waveform (optional, needs a GUI): `gtkwave picosrv32.vcd`
 
-## Example Output
-The testbench runs a simple program:
+`make sim` (Verilator, `--binary` mode) should also work but is
+untested in this repo's history — `make sim-iverilog` is what this
+design was actually verified with.
+
+## Testing
+```bash
+make sim-iverilog
 ```
-addi x1, x0, 5   // x1 = 5
-addi x2, x0, 3   // x2 = 3
-add  x3, x1, x2  // x3 = x1 + x2 = 8
-```
-You can verify in the waveform that:
-- x1 reaches 5
-- x2 reaches 3  
-- x3 reaches 8
+Runs a 16-instruction program covering every hazard type the pipeline
+handles, and checks final register/memory state against expected
+values computed independently. Expected output ends with
+`All tests PASSED.`
 
-## Pipeline Stages Explained
-1. **IF (Instruction Fetch)**: Fetch instruction from memory
-2. **ID (Instruction Decode)**: Decode instruction, read registers
-3. **EX (Execute)**: Perform ALU operation or calculate address
-4. **MEM (Memory)**: Access memory (for load/store)
-5. **WB (Write Back)**: Write result back to register file
-
-## Key Learning Points
-- **Pipelining**: How instructions overlap in execution for better throughput
-- **Hazards**: Structural, data, and control hazards that can cause stalls
-- **Forwarding**: Bypassing results to avoid stalls
-- **Control Logic**: How the CPU decides what to do each cycle
-- **Memory Interface**: How CPUs interact with memory systems
+## Pipeline Stages
+1. **IF** — fetch from instruction memory using the PC
+2. **ID** — decode opcode/funct3/funct7, read registers (with
+   same-cycle WB bypass), select immediate format
+3. **EX** — forward operands from EX/MEM and MEM/WB, run the ALU,
+   resolve branches
+4. **MEM** — access data memory for loads/stores
+5. **WB** — write the result back to the register file
 
 ## Future Enhancements
-- Complete RV32I instruction set
-- Proper hazard detection and forwarding unit
-- Branch prediction
-- Cache memory hierarchy (L1 I/D cache)
-- Privilege levels and memory protection
-- Performance counters
-- Debug interface
-- Integration with real memory models
-- Bootloader and simple OS support
+- `LUI`/`AUIPC`/`JAL`/`JALR` (currently unimplemented no-ops)
+- `SLT`/`SLTU`/`SLTI` comparison instructions
+- Byte/halfword loads and stores (`LB`/`LH`/`LBU`/`LHU`/`SB`/`SH`)
+- Branch prediction (currently always-not-taken until EX resolves)
+- A proper memory system (currently a flat combinational array in the
+  testbench, not a real memory hierarchy)
 
 ## License
 MIT

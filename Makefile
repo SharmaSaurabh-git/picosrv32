@@ -1,24 +1,30 @@
-# Makefile for Picosrv32 simulation
-VERILATOR = verilator
-VERILATOR_FLAGS = -Wall --cc --exe -O3
-TOP_MODULE = tb_picosrv32
+# Makefile for picosrv32 simulation.
+# Primary/verified flow: Icarus Verilog. Compile the DUT and testbench
+# as separate sources (the testbench does not `include the RTL).
+
 SOURCES = rtl/picosrv32.sv tb/tb_picosrv32.sv
-EXE = obj_dir/V$(TOP_MODULE)
+TOP_MODULE = tb_picosrv32
 
-all: sim
+sim-iverilog:
+	@mkdir -p obj_dir
+	iverilog -g2012 -o obj_dir/$(TOP_MODULE).vvp $(SOURCES)
+	vvp obj_dir/$(TOP_MODULE).vvp
 
-sim: $(EXE)
+# Verilator alternative (untested in this repo's history -- --binary
+# mode needs Verilator 4.106+; use sim-iverilog if unsure).
+VERILATOR = verilator
+VERILATOR_FLAGS = -Wall --binary --timing -O3 -Wno-DECLFILENAME
+
+sim: obj_dir/V$(TOP_MODULE)
 	@echo "Running simulation..."
-	@./$(EXE)
+	@./obj_dir/V$(TOP_MODULE)
 
-$(EXE): $(SOURCES)
-	@echo "Compiling with Verilator..."
+obj_dir/V$(TOP_MODULE): $(SOURCES)
 	@mkdir -p obj_dir
 	$(VERILATOR) $(VERILATOR_FLAGS) $(SOURCES) --top-module $(TOP_MODULE)
-	@make -C obj_dir -f V$(TOP_MODULE).mk V$(TOP_MODULE)
 
 clean:
 	@rm -rf obj_dir
 	@rm -f picosrv32.vcd
 
-.PHONY: all sim clean
+.PHONY: sim sim-iverilog clean
