@@ -65,7 +65,8 @@ module picosrv32 #(
     reg [31:0] if_id_insn;
 
     // ID/EX
-    reg [31:0] id_ex_pc;
+    // id_ex_pc is an output port (declared at module port list, line 30)
+    // No internal declaration needed - use the port directly
     reg [31:0] id_ex_rs1;
     reg [31:0] id_ex_rs2;
     reg [31:0] id_ex_imm;
@@ -229,35 +230,29 @@ module picosrv32 #(
         if (!rst_n) begin
             pc_reg <= RESET_VECTOR;
             id_ex_alu_result <= 32'd0;
-            id_ex_pc <= RESET_VECTOR;
             id_ex_is_jal <= 1'b0;
             id_ex_is_jalr <= 1'b0;
         end else if (branch_flush) begin
             pc_reg <= branch_target;
             id_ex_alu_result <= alu_result;
-            id_ex_pc <= pc_reg;
             id_ex_is_jal <= 1'b0;
             id_ex_is_jalr <= 1'b0;
         end else if (id_ex_is_jal) begin
             pc_reg <= jal_target;
             id_ex_alu_result <= jal_target;
-            id_ex_pc <= jal_target;
             id_ex_is_jal <= 1'b0;
             id_ex_is_jalr <= 1'b0;
         end else if (id_ex_is_jalr) begin
             pc_reg <= jalr_target;
             id_ex_alu_result <= jalr_target;
-            id_ex_pc <= jalr_target;
             id_ex_is_jal <= 1'b0;
             id_ex_is_jalr <= 1'b0;
         end else if (stall) begin
             pc_reg <= pc_reg;
             id_ex_alu_result <= id_ex_alu_result;
-            id_ex_pc <= id_ex_pc;
         end else begin
             pc_reg <= pc_plus_4;
             id_ex_alu_result <= alu_result;
-            id_ex_pc <= pc_reg;
         end
     end
 
